@@ -63,6 +63,8 @@ namespace ForkPlus.UI.UserControls
 
 		private bool _isLoaded;
 
+		private bool _generatingCommitMessage;
+
 		[Null]
 		private string _rebaseAmendSha;
 
@@ -262,6 +264,13 @@ namespace ForkPlus.UI.UserControls
 			_updateDiffAction = new DelayedAction<ChangedFileArgs>(UpdateDiff);
 			InitializeComponent();
 			PreferencesLocalization.ApplyCurrent(this);
+			GenerateCommitMessageButton.RefreshContent();
+			GenerateCommitMessageButton.Loaded += delegate
+			{
+				// AiActionButton.Loaded 只按 OpenAI 配置改可见性，这里再按本按钮的规则盖回去。
+				UpdateGenerateCommitMessageButtonState();
+			};
+			UpdateGenerateCommitMessageButtonState();
 			CommitDescriptionTextBox.SetAutocompleteProvider(_commitMessageAutocompleteProvider);
 			// v5.1.3：描述框也可输入 ":" 触发 emoji 选择器（注册在 Co-authored-by 补全之后，
 			// 同一段文本两者都命中时仍是 Co-authored-by 优先，互不干扰）。
@@ -279,6 +288,7 @@ namespace ForkPlus.UI.UserControls
 					RestoreGridColumnWidth();
 					RefreshDescriptionFieldHeight();
 					StageFileUserControl.RefreshUnstagedStatusLabel(GitModule.Settings.HideUntrackedFiles, ShowIgnoredFiles);
+					UpdateGenerateCommitMessageButtonState();
 				}
 			};
 			gridSplitter.DragCompleted += delegate
@@ -459,6 +469,8 @@ namespace ForkPlus.UI.UserControls
 			}
 			UpdateCommitButtonTitle();
 			UpdateCommitWarningMessage();
+			GenerateCommitMessageButton.RefreshContent();
+			UpdateGenerateCommitMessageButtonState();
 			FileDiffControl.ApplyLocalization();
 		}
 
@@ -1903,6 +1915,7 @@ namespace ForkPlus.UI.UserControls
 			CheckBoxAmend.IsEnabled = isAmendAllowed();
 			UpdateCommitButtonTitle();
 			UpdateCommitButtonState();
+			UpdateGenerateCommitMessageButtonState();
 			if (updateWarningMessage)
 			{
 				UpdateCommitWarningMessage();
@@ -2264,24 +2277,83 @@ namespace ForkPlus.UI.UserControls
 			}, JobFlags.Hidden);
 		}
 
-		private void RecentCommitMessagesContextMenu_Opened(object sender, RoutedEventArgs e)
+		private void GenerateCommitMessageButton_Click(object sender, RoutedEventArgs e)
 		{
-			ContextMenu contextMenu = sender as ContextMenu;
-			contextMenu.Items.Clear();
-			AiAgent[] availableAiAgents = AiAgent.GetAvailableAiAgents();
-			bool amend = AmendMode;
-			AiAgent[] array = availableAiAgents;
-			foreach (AiAgent aiAgent in array)
+			if (_generatingCommitMessage || RepositoryUserControl == null || GitModule == null)
 			{
+				return;
+			}
+			AiAgent[] agents = AiAgent.GetAvailableAiAgents();
+			bool openAi = OpenAiService.IsAiReviewConfigured();
+			int count = agents.Length + (openAi ? 1 : 0);
+			if (count <= 0)
+			{
+				return;
+			}
+			if (count == 1)
+			{
+				GenerateCommitMessageButton.ContextMenu = null;
+				if (openAi)
+				{
+					GenerateCommitMessageWithOpenAi();
+				}
+				else
+				{
+					GenerateCommitMessageWithAgent(agents[0]);
+				}
+				return;
+			}
+			ContextMenu menu = new ContextMenu();
+			foreach (AiAgent aiAgent in agents)
+			{
+				AiAgent captured = aiAgent;
 				MenuItem menuItem = new MenuItem
 				{
-					Header = PreferencesLocalization.FormatCurrent("Generate commit message with {0}", aiAgent.Name)
+					Header = PreferencesLocalization.FormatCurrent("Generate commit message with {0}", captured.Name)
 				};
 				menuItem.Click += delegate
 				{
-					RepositoryUserControl.JobQueue.Add(PreferencesLocalization.Current("Generate commit message"), delegate(JobMonitor monitor)
-					{
-						GitCommandResult<string> response2 = new GenerateCommitMessageShellCommand().Execute(aiAgent, GitModule.Path, amend, monitor);
+					GenerateCommitMessageWithAgent(captured);
+				};
+				menu.Items.Add(menuItem);
+			}
+			if (openAi)
+			{
+				MenuItem menuItem = new MenuItem
+				{
+					Header = PreferencesLocalization.FormatCurrent("Generate commit message with {0}", ForkPlusSettings.Default.AiReviewSelectedModel ?? "AI")
+				};
+				menuItem.Click += delegate
+				{
+					GenerateCommitMessageWithOpenAi();
+				};
+				menu.Items.Add(menuItem);
+			}
+			GenerateCommitMessageButton.ContextMenu = menu;
+			// 等这次点击结束再打开，避免按下按钮的同一下把刚弹出的菜单立刻关掉。
+			base.Dispatcher.Post(delegate
+			{
+				if (GenerateCommitMessageButton.ContextMenu == menu)
+				{
+					menu.Open();
+				}
+			});
+		}
+
+		private void GenerateCommitMessageWithAgent(AiAgent aiAgent)
+		{
+			if (_generatingCommitMessage || RepositoryUserControl == null || GitModule == null || aiAgent == null)
+			{
+				return;
+			}
+			bool amend = AmendMode;
+			_generatingCommitMessage = true;
+			GenerateCommitMessageButton.SetBusy(true, PreferencesLocalization.Current("AI is generating..."));
+			RepositoryUserControl.JobQueue.Add(PreferencesLocalization.Current("Generate commit message"), delegate(JobMonitor monitor)
+			{
+				try
+				{
+					GitCommandResult<string> response2 = new GenerateCommitMessageShellCommand().Execute(aiAgent, GitModule.Path, amend, monitor);
 					base.Dispatcher.Post(delegate
 					{
 						// Claude/AiAgent 的输出是缓冲到进程结束才一次性返回，期间用户可能已点取消。
@@ -2301,31 +2373,42 @@ namespace ForkPlus.UI.UserControls
 							RefreshDescriptionFieldHeight();
 						}
 					});
-					});
-				};
-				contextMenu.Items.Add(menuItem);
-				contextMenu.Items.Add(new Separator());
-			}
-			if (OpenAiService.IsAiReviewConfigured())
-			{
-				MenuItem menuItem2 = new MenuItem
+				}
+				finally
 				{
-					Header = PreferencesLocalization.FormatCurrent("Generate commit message with {0}", ForkPlusSettings.Default.AiReviewSelectedModel ?? "AI")
-				};
-				menuItem2.Click += delegate
-				{
-					RepositoryUserControl.JobQueue.Add(PreferencesLocalization.Current("Generate commit message"), delegate(JobMonitor monitor)
+					base.Dispatcher.Post(delegate
 					{
-						GitCommandResult<string> patchResult = new GetWorkingDirectoryFileChangesGitCommand().GetStagedPatch(GitModule, amend);
-						if (!patchResult.Succeeded)
+						_generatingCommitMessage = false;
+						GenerateCommitMessageButton.SetBusy(false);
+						UpdateGenerateCommitMessageButtonState();
+					});
+				}
+			});
+		}
+
+		private void GenerateCommitMessageWithOpenAi()
+		{
+			if (_generatingCommitMessage || RepositoryUserControl == null || GitModule == null)
+			{
+				return;
+			}
+			bool amend = AmendMode;
+			_generatingCommitMessage = true;
+			GenerateCommitMessageButton.SetBusy(true, PreferencesLocalization.Current("AI is generating..."));
+			RepositoryUserControl.JobQueue.Add(PreferencesLocalization.Current("Generate commit message"), delegate(JobMonitor monitor)
+			{
+				try
+				{
+					GitCommandResult<string> patchResult = new GetWorkingDirectoryFileChangesGitCommand().GetStagedPatch(GitModule, amend);
+					if (!patchResult.Succeeded)
+					{
+						base.Dispatcher.Post(delegate
 						{
-							base.Dispatcher.Post(delegate
-							{
-								new ErrorWindow(RepositoryUserControl, patchResult.Error).ShowDialog();
-							});
-							return;
-						}
-						OpenAiService openAiService = OpenAiService.CreateFromAiReviewSettings();
+							new ErrorWindow(RepositoryUserControl, patchResult.Error).ShowDialog();
+						});
+						return;
+					}
+					OpenAiService openAiService = OpenAiService.CreateFromAiReviewSettings();
 					// 流式 onChunk 回调：AI 生成的每个 chunk 实时追加到 commit 框，
 					// 用户无需等待整个请求完成才能看到内容。
 					System.Text.StringBuilder liveCommitMsg = new System.Text.StringBuilder();
@@ -2356,11 +2439,55 @@ namespace ForkPlus.UI.UserControls
 							RefreshDescriptionFieldHeight();
 						}
 					});
+				}
+				finally
+				{
+					base.Dispatcher.Post(delegate
+					{
+						_generatingCommitMessage = false;
+						GenerateCommitMessageButton.SetBusy(false);
+						UpdateGenerateCommitMessageButtonState();
 					});
-				};
-				contextMenu.Items.Add(menuItem2);
-				contextMenu.Items.Add(new Separator());
+				}
+			});
+		}
+
+		private void UpdateGenerateCommitMessageButtonState()
+		{
+			AiAgent[] agents = AiAgent.GetAvailableAiAgents();
+			bool openAi = OpenAiService.IsAiReviewConfigured();
+			bool available = openAi || agents.Length != 0;
+			GenerateCommitMessageButton.IsVisible = available;
+			if (_generatingCommitMessage)
+			{
+				return;
 			}
+			bool fieldsAllowed = RepositoryUserControl != null && AreCommitFieldsAllowed;
+			GenerateCommitMessageButton.IsEnabled = available && fieldsAllowed;
+			if (!available)
+			{
+				return;
+			}
+			string tip;
+			if (openAi && agents.Length == 0)
+			{
+				tip = PreferencesLocalization.FormatCurrent("Generate commit message with {0}", ForkPlusSettings.Default.AiReviewSelectedModel ?? "AI");
+			}
+			else if (!openAi && agents.Length == 1)
+			{
+				tip = PreferencesLocalization.FormatCurrent("Generate commit message with {0}", agents[0].Name);
+			}
+			else
+			{
+				tip = PreferencesLocalization.Current("Generate commit message");
+			}
+			global::Avalonia.Controls.ToolTip.SetTip(GenerateCommitMessageButton, tip);
+		}
+
+		private void RecentCommitMessagesContextMenu_Opened(object sender, RoutedEventArgs e)
+		{
+			ContextMenu contextMenu = sender as ContextMenu;
+			contextMenu.Items.Clear();
 			if (File.Exists(GitModule.HookPath(PrepareCommitMsgHook)))
 			{
 				Log.Info("Run prepare-commit-msg hook");

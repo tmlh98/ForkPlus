@@ -27,3 +27,5 @@ docs/evidence/*.png
 # 并行子代理编写用户手册时用的隔离构建/输出目录（防 CS0579 重复程序集特性 + 防杂物入库）
 obj-agent*/
 bin-agent*/
+
+publish/

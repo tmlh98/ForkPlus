@@ -130,6 +130,7 @@
     "AI Explain Commit": "IA Explicar commit",
     "AI Explain Commit...": "IA Explicar commit...",
     "AI Explain": "IA Explicación",
+    "AI Commit Message": "IA Mensaje de commit",
     "AI Explain {0}": "IA Explicación {0}",
     "AI Generate Stash Name": "IA Generar nombre de stash",
     "AI PR Description: {0}": "IA Descripción de PR: {0}",

@@ -110,6 +110,12 @@ namespace ForkPlus.UI.Controls
 			};
 		}
 
+		/// <summary>语言切换后按当前词典重绘按钮文案。Content 是 TextBlock，本地化遍历不会改它。</summary>
+		public void RefreshContent()
+		{
+			UpdateContent();
+		}
+
 		private static void OnActionVerbChanged(global::Avalonia.AvaloniaObject d, global::Avalonia.AvaloniaPropertyChangedEventArgs e)
 		{
 			((AiActionButton)d).UpdateContent();

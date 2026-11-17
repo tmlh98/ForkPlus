@@ -8,6 +8,7 @@ using System.Text.RegularExpressions;
 using System.Threading;
 using ForkPlus.Accounts;
 using ForkPlus.Git;
+using ForkPlus.Git.Commands;
 using ForkPlus.Jobs;
 using ForkPlus.Settings;
 using ForkPlus.UI.UserControls.Preferences;
@@ -63,7 +64,7 @@ namespace ForkPlus.Accounts.AiServices
 				commitMessageRegex = ForkPlusSettings.Default.CommitMessageRegex;
 			}
 			string regexInstruction = string.IsNullOrWhiteSpace(commitMessageRegex) ? "" : $"\nThe commit message must match this Go regular expression when represented as `title\\ndescription` using one LF between the title and description:\n`{commitMessageRegex}`\nIf there is no description, match the title only. If the regex implies a required prefix, issue id, type, scope, or format, follow it strictly.\n";
-			string text = $"\nWrite a commit message for my changes.\nThe commit message must be written in {responseLanguage}.\nExplain what were the changes and why the changes were done.\nFocus the most important changes.\nUse the present tense.\nUse a single word lowercase commit prefix only if it is natural for {responseLanguage} and allowed by the configured format.\nHard wrap lines at {pageGuideLinePosition} characters.\nEnsure the title is less than {commitSubjectLowLimit} (soft limit) and {commitSubjectHighLimit} (hard limit).\nDo not start any lines with the hash symbol.{regexInstruction}\nOnly respond with the commit message.\n\nBelow is my git diff:\n\n```\n{patchString}\n```\n";
+			string text = BuildCommitMessagePrompt(responseLanguage, pageGuideLinePosition, commitSubjectLowLimit, commitSubjectHighLimit, ReadCommitTemplate(gitModule), regexInstruction, patchString);
 			monitor.AppendOutputLine(PreferencesLocalization.Current("Message:\n"));
 			monitor.AppendOutputLine(text);
 			monitor.AppendOutputLine(PreferencesLocalization.Current("\nResponse:\n"));
@@ -96,9 +97,38 @@ namespace ForkPlus.Accounts.AiServices
 			return ServiceResult<OpenAiResponse>.Success(new OpenAiResponse(message));
 		}
 
+		private static string ReadCommitTemplate(GitModule gitModule)
+		{
+			if (gitModule == null)
+			{
+				return null;
+			}
+			try
+			{
+				GitCommandResult<CommitTemplate> result = new GetCommitTemplateGitCommand().Execute(gitModule);
+				if (!result.Succeeded || result.Result == null || string.IsNullOrWhiteSpace(result.Result.StringValue))
+				{
+					return null;
+				}
+				return result.Result.StringValue.Trim();
+			}
+			catch (Exception ex)
+			{
+				Log.Warn("Failed to read commit.template for AI commit message: " + ex.Message);
+				return null;
+			}
+		}
+
+		/// <summary>按 commit.template 的版式生成提示词。模板里的句子只是占位，不能原样输出。</summary>
+		private static string BuildCommitMessagePrompt(string responseLanguage, int pageGuideLinePosition, int commitSubjectLowLimit, int commitSubjectHighLimit, string template, string regexInstruction, string patchString)
+		{
+			string shape = string.IsNullOrWhiteSpace(template) ? "type(scope): <title>\n\n- <change>\n- <change>" : template;
+			return "\nWrite a commit message for my changes.\nThe commit message must be written in " + responseLanguage + ".\nFollow this layout exactly. The words inside it are placeholders, not the final text. Replace the title and every bullet with the real change. Do not copy placeholder instructions such as length limits, or sample words like 第一点 / 第二点.\n\n" + shape + "\n\nLayout rules:\n- The first line is the title and must start with one lowercase type: feat, fix, docs, style, refactor, perf, test, chore, or revert.\n- Add (scope) only when a short lowercase scope fits. Otherwise write `type: title` with no parentheses.\n- The title after the colon uses the present tense, does not end with a period, and is shorter than " + commitSubjectLowLimit + " characters (soft limit) and " + commitSubjectHighLimit + " characters (hard limit).\n- Put one blank line after the title.\n- Then write one bullet per change. Every bullet line starts with \"- \". Do not write paragraphs.\n- Hard wrap lines at " + pageGuideLinePosition + " characters.\n- Do not start any line with the hash symbol.\n" + regexInstruction + "Only respond with the commit message.\n\nBelow is my git diff:\n\n```\n" + patchString + "\n```\n";
+		}
+
 		private static string CreateRegexRetryPrompt(string previousMessage, string commitMessageRegex, string responseLanguage)
 		{
-			return $"\nRewrite the following commit message in {responseLanguage} so that it matches this Go regular expression when represented as `title\\ndescription` using one LF between the title and description:\n`{commitMessageRegex}`\nIf there is no description, match the title only. Only respond with the corrected commit message. Do not add explanations.\n\nPrevious commit message:\n```\n{previousMessage}\n```\n";
+			return $"\nRewrite the following commit message in {responseLanguage} so that it matches this Go regular expression when represented as `title\\ndescription` using one LF between the title and description:\n`{commitMessageRegex}`\nIf there is no description, match the title only. Keep the layout: a `type(scope): title` or `type: title` first line, one blank line, then lines that each start with \"- \". Do not turn bullets into paragraphs. Only respond with the corrected commit message. Do not add explanations.\n\nPrevious commit message:\n```\n{previousMessage}\n```\n";
 		}
 
 		public static bool MatchesCommitMessageRegex(string message, string pattern, out string error)
